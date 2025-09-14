@@ -1,33 +1,36 @@
-# Python cache
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-*.db
+*.pkl
 *.sqlite3
 
-# Environment files
+# Virtualenv
 .env
-.env.*
+.venv/
+env/
+venv/
+ENV/
 
 # VSCode
 .vscode/
 *.code-workspace
 
-# OneDrive extra files
+# Logs
+*.log
+
+# Migrations cache
+migrations/**/__pycache__/
+migrations/*.pyc
+
+# System files
+.DS_Store
+Thumbs.db
+
+# OneDrive sync files
 *.tmp
 *.lnk
 *.ini
-*.log
+*.db
 ~$*
-
-# Migrations cache (agar dobara bana sakte ho to)
-migrations/
-
-# Docker
-*.pid
-*.seed
-*.bak
-
-# Node (agar frontend bhi same repo me aa jaye)
-node_modules/

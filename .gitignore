@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Environment files
+.env
+.env.*
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# OneDrive extra files
+*.tmp
+*.lnk
+*.ini
+*.log
+~$*
+
+# Migrations cache (agar dobara bana sakte ho to)
+migrations/
+
+# Docker
+*.pid
+*.seed
+*.bak
+
+# Node (agar frontend bhi same repo me aa jaye)
+node_modules/

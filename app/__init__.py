@@ -6,6 +6,8 @@ from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
 from celery import Celery
 from dotenv import load_dotenv
+from flask_mail import Mail
+
 
 load_dotenv()
 
@@ -14,6 +16,7 @@ migrate = Migrate()
 jwt = JWTManager()
 socketio = SocketIO(cors_allowed_origins='*', async_mode='eventlet')
 celery = Celery(__name__)
+mail = Mail()
 
 def make_celery(app):
     celery.conf.update(
@@ -44,6 +47,12 @@ def create_app():
         CELERY_RESULT_BACKEND=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2"),
         OTP_EXPIRY_SECONDS=int(os.getenv("OTP_EXPIRY_SECONDS", "600")),
         OTP_RESEND_LIMIT_PER_HOUR=int(os.getenv("OTP_RESEND_LIMIT_PER_HOUR", "5")),
+          MAIL_SERVER=os.getenv("MAIL_SERVER", "smtp.gmail.com"),
+        MAIL_PORT=int(os.getenv("MAIL_PORT", 587)),
+        MAIL_USE_TLS=True,
+        MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
+        MAIL_PASSWORD=os.getenv("MAIL_PASSWORD"),
+        MAIL_DEFAULT_SENDER=os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME"))
     )
     db.init_app(app)
     migrate.init_app(app, db)
@@ -52,14 +61,15 @@ def create_app():
 
     from app.routes.auth import bp as auth_bp
     from app.routes.campaigns import bp as campaigns_bp
-    from app.routes.notifications import bp as notifications_bp
     from app.routes.admin import bp as admin_bp
+    from app.routes.notifications import notifications_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(campaigns_bp)
-    app.register_blueprint(notifications_bp)
     app.register_blueprint(admin_bp)
-
+    app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
+  
+    mail.init_app(app)
     # register socket events
     from app.sockets import socket_events
     socket_events.register(socketio)

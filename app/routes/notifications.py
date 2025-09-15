@@ -1,53 +1,118 @@
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db, socketio
+from app.models.user import User
 from app.models.notification import Notification
 from app.models.campaign_recipient import CampaignRecipient
 from app.models.action_log import ActionLog
 from datetime import datetime
-from flask_jwt_extended import jwt_required, get_jwt_identity
 
-bp = Blueprint('notifications', __name__, url_prefix='/api/notifications')
+notifications_bp = Blueprint("notifications", __name__)
 
-@bp.route('/', methods=['GET'])
+# 📌 Get user notifications (in-app)
+@notifications_bp.route("/", methods=["GET"])
 @jwt_required()
-def list_notifications():
+def get_notifications():
     ident = get_jwt_identity()
-    user_id = ident.get('user_id')
-    # naive pagination
-    page = int(request.args.get('page', 1))
-    per = int(request.args.get('per', 20))
-    q = Notification.query.join(CampaignRecipient, Notification.campaign_recipient_id==CampaignRecipient.id).filter(CampaignRecipient.user_id==user_id)
-    total = q.count()
-    items = q.order_by(Notification.created_at.desc()).offset((page-1)*per).limit(per).all()
-    out = []
-    for n in items:
-        out.append({'id': n.id, 'campaign_recipient_id': n.campaign_recipient_id, 'payload': n.payload, 'delivered_at': n.delivered_at.isoformat() if n.delivered_at else None})
-    return jsonify(total=total, items=out)
+    notes = Notification.query.filter_by(user_id=ident["id"]).all()
+    return jsonify([{
+        "id": n.id,
+        "message": n.message,
+        "delivered_at": n.delivered_at,
+        "created_at": n.created_at.isoformat()
+    } for n in notes])
 
-@bp.route('/<int:notification_id>/action', methods=['POST'])
+# 📌 Take action on a campaign
+@notifications_bp.route("/<int:recipient_id>/action", methods=["POST"])
 @jwt_required()
-def action_notification(notification_id):
+def take_action(recipient_id):
+    from app.tasks import send_email_task
     ident = get_jwt_identity()
-    user_id = ident.get('user_id')
-    data = request.json or {}
-    action = data.get('action')
-    reason = data.get('reason')
-    hold_until = data.get('hold_until')
-    source_name = data.get('source_name')
-    notif = Notification.query.get_or_404(notification_id)
-    rec = CampaignRecipient.query.get_or_404(notif.campaign_recipient_id)
-    # simple permission check
-    if rec.user_id != user_id:
-        return jsonify(msg='forbidden'), 403
-    # update recipient status
-    rec.status = action
-    rec.acted_at = datetime.utcnow()
-    db.session.add(rec)
-    # write action log
-    log = ActionLog(campaign_recipient_id=rec.id, action=action, actor_id=user_id, actor_role=ident.get('roles',[]), reason=reason, source_name=source_name)
+    data = request.get_json(force=True)
+    action = data.get("action")
+    hold_until = data.get("hold_until")
+    source_name = data.get("source_name")
+
+    # Update campaign recipient status
+    recipient = CampaignRecipient.query.get_or_404(recipient_id)
+    recipient.status = action
+    recipient.acted_at = datetime.utcnow()
+    db.session.add(recipient)
+
+    # Log the action
+    log = ActionLog(
+        recipient_id=recipient.id,
+        action=action,
+        actor_id=ident["id"],
+        source_name=source_name,
+        hold_until=datetime.fromisoformat(hold_until) if hold_until else None
+    )
     db.session.add(log)
     db.session.commit()
-    # emit socket to campaign creator / sales
-    socketio.emit('notification_action', {'campaign_recipient_id': rec.id, 'action': action}, room=f'user_{rec.campaign.created_by}')
-    return jsonify(msg='ok')
 
+    # Notify campaign creator via socket (in-app)
+    creator = User.query.get(recipient.campaign.creator_id)
+    socketio.emit(
+        "notification",
+        {"message": f"{recipient.user.name} {action} the campaign"},
+        room=f"user_{creator.id}"
+    )
+
+    # Send email to campaign creator
+    if creator:
+        send_email_task.delay(
+            subject=f"Campaign {recipient.campaign.title}",
+            recipients=[creator.email],
+            body=f"{recipient.user.name} has {action} the campaign."
+        )
+
+    return jsonify({"message": "Action recorded"})
+
+# 📌 Send notification to one user
+@notifications_bp.route("/send/<int:user_id>", methods=["POST"])
+@jwt_required()
+def send_notification_to_user(user_id):
+    from app.tasks import send_email_task
+    data = request.get_json(force=True)
+    msg = str(data.get("message", ""))
+    email_subject = str(data.get("subject", "New Notification"))
+
+    # Save in-app notification
+    note = Notification(
+        user_id=user_id,
+        message=msg,
+        delivered_at=datetime.utcnow()
+    )
+    db.session.add(note)
+    db.session.commit()
+
+    # Socket notification (in-app)
+    socketio.emit("notification", {"message": msg}, room=f"user_{user_id}")
+
+    # Send email
+    user = User.query.get(user_id)
+    if user:
+        send_email_task.delay(
+            subject=email_subject,
+            recipients=[user.email],
+            body=msg
+        )
+
+    return jsonify({"message": "Notification sent"})
+
+# 📌 Send bulk email notifications (no in-app)
+@notifications_bp.route("/send", methods=["POST"])
+@jwt_required()
+def send_bulk_notification():
+    from app.tasks import send_email_task
+    data = request.get_json(force=True)
+    subject = str(data.get("subject", "No subject"))
+    recipients = data.get("recipients", [])
+    body = str(data.get("body", ""))
+
+    if not recipients:
+        return jsonify({"error": "Recipients required"}), 400
+
+    # Queue email task
+    send_email_task.delay(subject=subject, recipients=recipients, body=body)
+    return jsonify({"message": "Email queued"}), 200

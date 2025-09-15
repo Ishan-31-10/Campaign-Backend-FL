@@ -12,3 +12,5 @@ redis==4.5.5
 pandas==2.2.3
 eventlet==0.33.3
 flask-limiter==2.9.0
+Flask-Mail==0.9.1
+

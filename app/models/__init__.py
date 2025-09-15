@@ -5,3 +5,4 @@ from .campaign_recipient import CampaignRecipient
 from .notification import Notification
 from .action_log import ActionLog
 from .admin_otp import AdminOTP
+from flask_mail import Mail

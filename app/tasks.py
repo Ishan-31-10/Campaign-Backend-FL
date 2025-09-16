@@ -1,20 +1,11 @@
-from celery import Celery
-from flask_mail import Message
 from datetime import datetime
-from app import create_app, db, mail
-from app.models.campaign import Campaign
+from flask_mail import Message
+from app import db, mail, celery
 
-# Flask app + celery init
-flask_app = create_app()
-celery = Celery(__name__)
-celery.conf.update(flask_app.config)
-
-# -----------------------
-# ⏰ Campaign deadline check task
-# -----------------------
-@celery.task
+@celery.task(name="app.tasks.check_campaign_deadlines")
 def check_campaign_deadlines():
-    with flask_app.app_context():
+    try:
+        from app.models.campaign import Campaign
         now = datetime.utcnow()
         campaigns = Campaign.query.filter(
             Campaign.due_at.isnot(None),
@@ -27,31 +18,22 @@ def check_campaign_deadlines():
                     r.status = "expired"
                     r.acted_at = now
                     db.session.add(r)
-
+        
         db.session.commit()
-        return f"✅ Checked deadlines at {now}, updated {len(campaigns)} campaigns."
+    except Exception as e:
+        db.session.rollback()
+        print(f"Database transaction failed: {e}")
+        raise
+    return f"Checked deadlines at {now}, updated {len(campaigns)} campaigns."
 
-
-# -----------------------
-# 📧 Async email task
-# -----------------------
-@celery.task
+@celery.task(name="app.tasks.send_email_task")
 def send_email_task(subject, recipients, body):
-    """
-    Send email asynchronously using Flask-Mail.
-    Args:
-        subject (str): Email subject
-        recipients (list[str]): List of recipients
-        body (str): Email body
-    """
-    with flask_app.app_context():
-        try:
-            msg = Message(
-                subject=subject,
-                recipients=recipients,
-                body=body
-            )
-            mail.send(msg)
-            return f"✅ Email sent to {recipients}"
-        except Exception as e:
-            return f"❌ Email send failed: {str(e)}"
+    try:
+        if isinstance(recipients, str):
+            recipients = [recipients]
+        msg = Message(subject=str(subject), recipients=recipients, body=str(body))
+        mail.send(msg)
+        return f"Email sent to {recipients}"
+    except Exception as e:
+        print("send_email_task error:", repr(e))
+        return f"Email send failed: {str(e)}"

@@ -10,17 +10,21 @@ import random
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
+# in app/routes/auth.py (replace register and login functions)
+
 @bp.route("/register", methods=["POST"])
 def register():
     data = request.json or {}
     email = data.get("email")
     password = data.get("password")
+    name = data.get("name")
+    roles = data.get("roles", [])  # expect list, e.g. ["sales"] or ["delivery"]
     if not email or not password:
         return jsonify(msg="email and password required"), 400
     if User.query.filter_by(email=email).first():
         return jsonify(msg="user exists"), 400
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    user = User(email=email, password_hash=pw_hash, roles=data.get("roles", []), name=data.get("name"))
+    user = User(email=email, password_hash=pw_hash, roles=roles, name=name)
     db.session.add(user)
     db.session.commit()
     return jsonify(msg="registered", id=user.id), 201
@@ -37,9 +41,9 @@ def login():
         return jsonify(msg="invalid credentials"), 401
     if not bcrypt.checkpw(password.encode(), user.password_hash.encode()):
         return jsonify(msg="invalid credentials"), 401
-    roles = user.roles or []
-    access = create_access_token(identity={"user_id": user.id, "email": user.email, "roles": roles}, expires_delta=timedelta(hours=8))
-    return jsonify(access_token=access, user={"id": user.id, "email": user.email, "roles": roles})
+    # IMPORTANT: store only user_id (string) as identity — simpler & safer
+    access = create_access_token(identity=str(user.id), expires_delta=timedelta(hours=8))
+    return jsonify(access_token=access, user={"id": user.id, "email": user.email, "roles": user.roles or []})
 
 # Admin OTP flow
 def _hash_otp(otp):

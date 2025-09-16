@@ -1,6 +1,6 @@
 from app import create_app, socketio
 app = create_app()
-@app.route("/health")
+@app.routes("/health")
 def health():
     return {"status": "ok"}
 if __name__ == "__main__":

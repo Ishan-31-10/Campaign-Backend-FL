@@ -1,118 +1,117 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app import db, socketio
+from app import db, socketio, celery  # 'celery' is now imported here
 from app.models.user import User
 from app.models.notification import Notification
 from app.models.campaign_recipient import CampaignRecipient
 from app.models.action_log import ActionLog
 from datetime import datetime
 
-notifications_bp = Blueprint("notifications", __name__)
+notifications_bp = Blueprint("notifications", __name__, url_prefix="/api/notifications")
 
-# 📌 Get user notifications (in-app)
+# helper to get current user object
+def current_user():
+    ident = get_jwt_identity()
+    try:
+        uid = int(ident)
+    except Exception:
+        if isinstance(ident, dict):
+            uid = int(ident.get("user_id"))
+        else:
+            return None
+    return User.query.get(uid)
+
 @notifications_bp.route("/", methods=["GET"])
 @jwt_required()
 def get_notifications():
-    ident = get_jwt_identity()
-    notes = Notification.query.filter_by(user_id=ident["id"]).all()
+    user = current_user()
+    if not user:
+        return jsonify({"error": "invalid token"}), 401
+    notes = Notification.query.filter_by(user_id=user.id).order_by(Notification.created_at.desc()).all()
     return jsonify([{
         "id": n.id,
         "message": n.message,
-        "delivered_at": n.delivered_at,
+        "subject": n.subject,
+        "delivered_at": n.delivered_at.isoformat() if n.delivered_at else None,
         "created_at": n.created_at.isoformat()
     } for n in notes])
 
-# 📌 Take action on a campaign
+
 @notifications_bp.route("/<int:recipient_id>/action", methods=["POST"])
 @jwt_required()
 def take_action(recipient_id):
-    from app.tasks import send_email_task
-    ident = get_jwt_identity()
+    user = current_user()
+    if not user:
+        return jsonify({"error": "invalid token"}), 401
+
     data = request.get_json(force=True)
     action = data.get("action")
     hold_until = data.get("hold_until")
     source_name = data.get("source_name")
 
-    # Update campaign recipient status
     recipient = CampaignRecipient.query.get_or_404(recipient_id)
+    if recipient.user_id and recipient.user_id != user.id and 'admin' not in (user.roles or []):
+        return jsonify({"error": "forbidden"}), 403
+
     recipient.status = action
     recipient.acted_at = datetime.utcnow()
     db.session.add(recipient)
 
-    # Log the action
     log = ActionLog(
-        recipient_id=recipient.id,
+        campaign_recipient_id=recipient.id,
         action=action,
-        actor_id=ident["id"],
-        source_name=source_name,
-        hold_until=datetime.fromisoformat(hold_until) if hold_until else None
+        actor_id=user.id,
+        actor_role=",".join(user.roles or []),
+        reason=data.get("reason"),
+        hold_until=datetime.fromisoformat(hold_until) if hold_until else None,
+        source_name=source_name
     )
     db.session.add(log)
     db.session.commit()
 
-    # Notify campaign creator via socket (in-app)
-    creator = User.query.get(recipient.campaign.creator_id)
-    socketio.emit(
-        "notification",
-        {"message": f"{recipient.user.name} {action} the campaign"},
-        room=f"user_{creator.id}"
-    )
+    creator = User.query.get(recipient.campaign.created_by)
+    socketio.emit("notification", {"message": f"{recipient.user_id} {action} the campaign"}, room=f"user_{creator.id}" if creator else None)
 
-    # Send email to campaign creator
-    if creator:
-        send_email_task.delay(
-            subject=f"Campaign {recipient.campaign.title}",
-            recipients=[creator.email],
-            body=f"{recipient.user.name} has {action} the campaign."
-        )
+    if creator and creator.email:
+        celery.send_email_task.delay(subject=f"Campaign {recipient.campaign.title}", recipients=[creator.email], body=f"Recipient {recipient.user_id} has {action} the campaign.")
 
     return jsonify({"message": "Action recorded"})
 
-# 📌 Send notification to one user
+
 @notifications_bp.route("/send/<int:user_id>", methods=["POST"])
 @jwt_required()
 def send_notification_to_user(user_id):
-    from app.tasks import send_email_task
+    sender = current_user()
+    if not sender:
+        return jsonify({"error": "invalid token"}), 401
+
     data = request.get_json(force=True)
     msg = str(data.get("message", ""))
-    email_subject = str(data.get("subject", "New Notification"))
+    subject = str(data.get("subject", "New Notification"))
 
-    # Save in-app notification
-    note = Notification(
-        user_id=user_id,
-        message=msg,
-        delivered_at=datetime.utcnow()
-    )
+    note = Notification(user_id=user_id, message=msg, subject=subject, delivered_at=datetime.utcnow())
     db.session.add(note)
     db.session.commit()
 
-    # Socket notification (in-app)
     socketio.emit("notification", {"message": msg}, room=f"user_{user_id}")
 
-    # Send email
-    user = User.query.get(user_id)
-    if user:
-        send_email_task.delay(
-            subject=email_subject,
-            recipients=[user.email],
-            body=msg
-        )
+    receiver = User.query.get(user_id)
+    if receiver and receiver.email:
+        celery.send_email_task.delay(subject=subject, recipients=[receiver.email], body=msg)
 
     return jsonify({"message": "Notification sent"})
 
-# 📌 Send bulk email notifications (no in-app)
+
 @notifications_bp.route("/send", methods=["POST"])
 @jwt_required()
 def send_bulk_notification():
-    from app.tasks import send_email_task
     data = request.get_json(force=True)
     subject = str(data.get("subject", "No subject"))
     recipients = data.get("recipients", [])
     body = str(data.get("body", ""))
 
-    if not recipients:
-        return jsonify({"error": "Recipients required"}), 400
+    if not recipients or not isinstance(recipients, list):
+        return jsonify({"error": "Recipients required as list"}), 400
 
-    # Queue email task
-    send_email_task.delay(subject=subject, recipients=recipients, body=body)
+    celery.send_email_task.delay(subject=subject, recipients=recipients, body=body)
     return jsonify({"message": "Email queued"}), 200
